@@ -1,0 +1,83 @@
+name: Bygg og publiser filmsøk.no
+
+# Dette repoet inneholder bare denne workflowen. Selve koden ligger i et
+# privat repo og hentes med en skrivebeskyttet deploy key.
+
+on:
+  schedule:
+    - cron: "0 4 * * *"   # hver natt 04:00 UTC (06:00 norsk sommertid)
+  workflow_dispatch:       # manuell kjøring: gh workflow run build.yml -R nilidesign/filmsok-site
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120    # et heng skal ikke brenne timer
+    steps:
+      - name: Hent kilden (privat repo)
+        uses: actions/checkout@v4
+        with:
+          repository: nilidesign/filmsok
+          ref: main
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          path: src
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Bygg siden
+        working-directory: src
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          # Valgfri: bedre norske handlingsreferat via DeepL. Tom = av.
+          DEEPL_API_KEY: ${{ secrets.DEEPL_API_KEY }}
+          SITE_URL: https://filmsok.no
+          WORKERS: "16"
+          MAX_MOVIES: "100000"
+          # Gårsdagens data/avail.json hentes fra nettsiden og gir «nytt på Netflix».
+          # Feiler henting (ikke 404), avbrytes bygget i stedet for å miste historikken.
+          REQUIRE_PREV_AVAIL: "1"
+        run: python3 scripts/build.py
+
+      - name: Stage det som skal publiseres
+        run: |
+          mkdir -p _site
+          # Kopier ALT unntatt kilde og verktøy, så en ny sidetype ikke kan glemmes.
+          rsync -a \
+            --exclude '.git' --exclude '.github' --exclude '.claude' \
+            --exclude 'scripts' --exclude '_site' \
+            --exclude 'README.md' --exclude 'tmdb-email.md' \
+            --exclude 'bygg.sh' --exclude '.gitignore' \
+            src/ _site/
+          test -f _site/index.html || { echo "::error::index.html mangler"; exit 1; }
+          test -d _site/film     || { echo "::error::film/ mangler"; exit 1; }
+          pages=$(find _site -name index.html | wc -l)
+          echo "Publiserer $pages sider"
+          [ "$pages" -ge 50 ] || { echo "::error::bare $pages sider"; exit 1; }
+          # GitHub Pages tåler ca. 1 GB. --apparent-size måler faktiske bytes.
+          mb=$(du -sm --apparent-size _site | cut -f1)
+          echo "Størrelse: ${mb} MB"
+          [ "$mb" -lt 950 ] || { echo "::error::${mb} MB er for nær Pages-grensen på 1 GB."; exit 1; }
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
