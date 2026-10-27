@@ -7,6 +7,11 @@ on:
   schedule:
     - cron: "0 4 * * *"   # hver natt 04:00 UTC (06:00 norsk sommertid)
   workflow_dispatch:       # manuell kjøring: gh workflow run build.yml -R nilidesign/filmsok-site
+    inputs:
+      indexnow_all:
+        description: "Si fra til Bing om ALLE sidene (ellers bare oversiktssider og nye sider)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -68,9 +73,22 @@ jobs:
           echo "Størrelse: ${mb} MB"
           [ "$mb" -lt 950 ] || { echo "::error::${mb} MB er for nær Pages-grensen på 1 GB."; exit 1; }
 
+      - name: Lag IndexNow-lister (sendes etter publisering)
+        continue-on-error: true
+        run: |
+          python3 src/scripts/indexnow.py --site _site --live https://filmsok.no --out indexnow \
+            ${{ inputs.indexnow_all && '--all' || '' }}
+
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: indexnow
+          path: indexnow
+          if-no-files-found: ignore
+          retention-days: 3
 
   deploy:
     needs: build
@@ -81,6 +99,31 @@ jobs:
     steps:
       - id: deploy
         uses: actions/deploy-pages@v4
+
+  # Gir Bing (og andre IndexNow-søkemotorer) beskjed når siden er live. Feiler
+  # dette, skal ikke publiseringen regnes som mislykket.
+  indexnow:
+    needs: deploy
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: indexnow
+          path: indexnow
+      - name: Send til IndexNow
+        run: |
+          sleep 60    # la siden og nøkkelfilen bli tilgjengelig først
+          shopt -s nullglob
+          files=(indexnow/indexnow-*.json)
+          [ ${#files[@]} -gt 0 ] || { echo "Ingenting å sende"; exit 0; }
+          for f in "${files[@]}"; do
+            n=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1]))['urlList']))" "$f")
+            code=$(curl -sS -o resp.txt -w '%{http_code}' -X POST https://api.indexnow.org/indexnow \
+              -H 'Content-Type: application/json; charset=utf-8' --data-binary "@$f")
+            echo "$f: $n adresser -> HTTP $code $(head -c 200 resp.txt)"
+            case "$code" in 200|202) ;; *) exit 1 ;; esac
+          done
 
   # GitHub slår av planlagte kjøringer i offentlige repoer etter 60 dager uten
   # aktivitet. Dette repoet får sjelden commits, så vi lager en tom commit når
