@@ -119,9 +119,15 @@ jobs:
           [ ${#files[@]} -gt 0 ] || { echo "Ingenting å sende"; exit 0; }
           for f in "${files[@]}"; do
             n=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1]))['urlList']))" "$f")
-            code=$(curl -sS -o resp.txt -w '%{http_code}' -X POST https://api.indexnow.org/indexnow \
-              -H 'Content-Type: application/json; charset=utf-8' --data-binary "@$f")
-            echo "$f: $n adresser -> HTTP $code $(head -c 200 resp.txt)"
+            # 403 «SiteVerificationNotCompleted» kommer til Bing har hentet nøkkelfilen;
+            # prøv noen ganger før vi gir opp
+            for attempt in 1 2 3 4; do
+              code=$(curl -sS -o resp.txt -w '%{http_code}' -X POST https://api.indexnow.org/indexnow \
+                -H 'Content-Type: application/json; charset=utf-8' --data-binary "@$f")
+              echo "$f: $n adresser -> HTTP $code (forsøk $attempt) $(head -c 200 resp.txt)"
+              case "$code" in 200|202) break ;; esac
+              [ "$attempt" -lt 4 ] && sleep 120
+            done
             case "$code" in 200|202) ;; *) exit 1 ;; esac
           done
 
